@@ -10,13 +10,12 @@ ADDR = (HOST, PORT)
 
 clients = {}        # socket -> name
 names_to_sock = {}  # name -> socket
-addresses = {}
 
 SERVER = socket(AF_INET, SOCK_STREAM)
 SERVER.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 SERVER.bind(ADDR)
 
-# ======= HÀM GỬI =======
+# ======= GỬI TIN =======
 def send_to(target, text: str):
     try:
         sock = names_to_sock.get(target) if isinstance(target, str) else target
@@ -41,11 +40,10 @@ def broadcast(data: bytes, prefix: str = ""):
 rps_lock = Lock()
 rooms = {}          # room_id -> dict
 game_of = {}        # name -> room_id
-pending_invite = {} # target_name -> inviter_name
+pending_invite = {} # target -> inviter
 
 def judge(a, b):
-    if a == b:
-        return "draw"
+    if a == b: return "draw"
     wins = {("rock", "scissors"), ("scissors", "paper"), ("paper", "rock")}
     return "a" if (a, b) in wins else "b"
 
@@ -73,8 +71,7 @@ def create_room(p1, p2, best_of=3):
 def end_room(room_id):
     with rps_lock:
         room = rooms.get(room_id)
-        if not room:
-            return
+        if not room: return
         for p in room["players"]:
             game_of.pop(p, None)
         room["active"] = False
@@ -86,8 +83,7 @@ def handle_move(name, move):
         return
     with rps_lock:
         room = rooms.get(room_id)
-        if not room or not room["active"]:
-            return
+        if not room or not room["active"]: return
         if move not in ("rock", "paper", "scissors"):
             send_to(name, "[[INFO]] Nước đi không hợp lệ.")
             return
@@ -96,11 +92,9 @@ def handle_move(name, move):
 
     send_to(name, f"[[YOU_MOVED]] {move}")
 
-    # nếu cả hai đã ra tay
     with rps_lock:
         room = rooms.get(room_id)
-        if not room or not room["active"]:
-            return
+        if not room or not room["active"]: return
         p1, p2 = room["players"]
         if p1 in room["moves"] and p2 in room["moves"]:
             a, b = room["moves"][p1], room["moves"][p2]
@@ -150,15 +144,17 @@ def handle_command(name, text):
         if not can_play(name) or not can_play(inviter):
             send_to(name, "[[INFO]] Một trong hai đang bận.")
             return
-        create_room(inviter, name)
-        send_to(inviter, f"[[GAME_START]] {inviter},{name}")
-        send_to(name, f"[[GAME_START]] {inviter},{name}")
+        room_id = create_room(inviter, name)
+        if room_id:
+            send_to(inviter, f"[[GAME_START]] {inviter},{name}")
+            send_to(name, f"[[GAME_START]] {inviter},{name}")
         return
 
     if text.startswith("/decline "):
         inviter = text.split()[1]
-        pending_invite.pop(name, None)
-        send_to(inviter, f"[[INFO]] {name} từ chối lời mời.")
+        if pending_invite.get(name) == inviter:
+            pending_invite.pop(name, None)
+            send_to(inviter, f"[[INFO]] {name} từ chối lời mời.")
         return
 
     if text.startswith("/move "):
@@ -173,7 +169,7 @@ def handle_command(name, text):
         send_to(name, "[[INFO]] Đã thoát ván.")
         return
 
-# ======= CORE SERVER =======
+# ======= SERVER CORE =======
 def accept_incoming():
     while True:
         client, addr = SERVER.accept()
@@ -182,31 +178,40 @@ def accept_incoming():
         Thread(target=handle_client, args=(client,), daemon=True).start()
 
 def handle_client(client):
-    name = client.recv(BUFSIZ).decode("utf8").strip()
-    if not name:
-        name = f"user_{addresses.get(client, ('?', 0))[1]}"
-    clients[client] = name
-    names_to_sock[name] = client
-    broadcast(f"{name} đã tham gia!".encode("utf8"))
-    while True:
-        try:
+    try:
+        name = client.recv(BUFSIZ).decode("utf8").strip()
+        if not name:
+            name = f"user_{len(clients)+1}"
+        clients[client] = name
+        names_to_sock[name] = client
+        broadcast(f"{name} đã tham gia!".encode("utf8"))
+
+        while True:
             data = client.recv(BUFSIZ)
-        except:
-            break
-        if not data:
-            break
-        text = data.decode("utf8").strip()
-        if text == "{quit}":
-            break
-        if text.startswith("/"):
-            handle_command(name, text)
-        else:
-            broadcast(data, prefix=name + ": ")
-    print(f"[DISCONNECT] {name}")
-    clients.pop(client, None)
-    names_to_sock.pop(name, None)
-    client.close()
-    broadcast(f"{name} đã thoát.".encode("utf8"))
+            if not data: break
+            text = data.decode("utf8").strip()
+            if text == "{quit}": break
+            if text.startswith("/"):
+                handle_command(name, text)
+            else:
+                broadcast(data, prefix=name + ": ")
+    except:
+        pass
+    finally:
+        name = clients.get(client)
+        if name:
+            print(f"[DISCONNECT] {name}")
+            clients.pop(client, None)
+            names_to_sock.pop(name, None)
+            rid = game_of.pop(name, None)
+            if rid:
+                end_room(rid)
+            pending_invite.pop(name, None)
+            for t, i in list(pending_invite.items()):
+                if i == name:
+                    pending_invite.pop(t, None)
+            broadcast(f"{name} đã thoát.".encode("utf8"))
+        client.close()
 
 if __name__ == "__main__":
     print("[STARTING] Server đang khởi động...")
