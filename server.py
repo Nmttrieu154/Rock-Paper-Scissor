@@ -2,8 +2,8 @@ import socket
 import threading
 
 # ====== CẤU HÌNH ======
-ĐỊA_CHỦ = "0.0.0.0"
-CỔNG = 5555
+DIA_CHI = "0.0.0.0"
+CONG = 5555
 
 # ====== DANH SÁCH NGƯỜI CHƠI ======
 danh_sach_client = {}          # {client_socket: ten_nguoi_choi}
@@ -109,9 +109,9 @@ def xu_ly_client(client):
 # ====== CHẠY SERVER ======
 def bat_dau_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((ĐỊA_CHỦ, CỔNG))
+    server.bind((DIA_CHI, CONG))
     server.listen()
-    print(f"🚀 Server đang chạy tại {ĐỊA_CHỦ}:{CỔNG}")
+    print(f"🚀 Server đang chạy tại {DIA_CHI}:{CONG}")
 
     while True:
         client, dia_chi = server.accept()
