@@ -1,220 +1,122 @@
-#!/usr/bin/env python3
-from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, socket
-from threading import Thread, Lock
-import uuid
+import socket
+import threading
 
-HOST = "127.0.0.1"
-PORT = 33000
-BUFSIZ = 2048
-ADDR = (HOST, PORT)
+# ====== CẤU HÌNH ======
+ĐỊA_CHỦ = "0.0.0.0"
+CỔNG = 5555
 
-clients = {}        # socket -> name
-names_to_sock = {}  # name -> socket
+# ====== DANH SÁCH NGƯỜI CHƠI ======
+danh_sach_client = {}          # {client_socket: ten_nguoi_choi}
+ten_nguoi_choi_dict = {}       # {ten_nguoi_choi: client_socket}
+loi_moi = {}                   # {ten_nguoi_choi: ten_nguoi_moi}
+lua_chon = {}                  # {ten_nguoi_choi: lua_chon}
 
-SERVER = socket(AF_INET, SOCK_STREAM)
-SERVER.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-SERVER.bind(ADDR)
-
-# ======= GỬI TIN =======
-def send_to(target, text: str):
+# ====== GỬI TIN NHẮN ======
+def gui_tin_nhan(nguoi_nhan, tin_nhan):
     try:
-        sock = names_to_sock.get(target) if isinstance(target, str) else target
-        if sock:
-            sock.send((text + "\n").encode("utf8"))
-    except Exception:
-        pass
+        nguoi_nhan.send(tin_nhan.encode('utf-8'))
+    except:
+        nguoi_nhan.close()
 
-def broadcast(data: bytes, prefix: str = ""):
-    dead = []
-    for sock in list(clients.keys()):
+def phat_broadcast(tin_nhan):
+    for c in danh_sach_client:
         try:
-            sock.send(prefix.encode("utf8") + data)
-        except Exception:
-            dead.append(sock)
-    for d in dead:
-        name = clients.pop(d, None)
-        if name:
-            names_to_sock.pop(name, None)
+            c.send(tin_nhan.encode('utf-8'))
+        except:
+            c.close()
 
-# ======= LOGIC GAME =======
-rps_lock = Lock()
-rooms = {}          # room_id -> dict
-game_of = {}        # name -> room_id
-pending_invite = {} # target -> inviter
+# ====== XÁC ĐỊNH NGƯỜI THẮNG ======
+def xac_dinh_thang(p1, p2):
+    c1, c2 = lua_chon.get(p1), lua_chon.get(p2)
+    if not c1 or not c2:
+        return None
 
-def judge(a, b):
-    if a == b: return "draw"
-    wins = {("rock", "scissors"), ("scissors", "paper"), ("paper", "rock")}
-    return "a" if (a, b) in wins else "b"
+    if c1 == c2:
+        return "Hòa!"
+    elif (c1 == "búa" and c2 == "kéo") or \
+         (c1 == "bao" and c2 == "búa") or \
+         (c1 == "kéo" and c2 == "bao"):
+        return f"{p1} thắng!"
+    else:
+        return f"{p2} thắng!"
 
-def can_play(name):
-    with rps_lock:
-        return name not in game_of
-
-def create_room(p1, p2, best_of=3):
-    with rps_lock:
-        if p1 in game_of or p2 in game_of:
-            return None
-        room_id = str(uuid.uuid4())[:8]
-        rooms[room_id] = {
-            "players": [p1, p2],
-            "scores": {p1: 0, p2: 0},
-            "moves": {},
-            "best_of": best_of,
-            "round": 1,
-            "active": True
-        }
-        game_of[p1] = room_id
-        game_of[p2] = room_id
-        return room_id
-
-def end_room(room_id):
-    with rps_lock:
-        room = rooms.get(room_id)
-        if not room: return
-        for p in room["players"]:
-            game_of.pop(p, None)
-        room["active"] = False
-
-def handle_move(name, move):
-    room_id = game_of.get(name)
-    if not room_id:
-        send_to(name, "[[INFO]] Bạn chưa ở trong ván nào.")
-        return
-    with rps_lock:
-        room = rooms.get(room_id)
-        if not room or not room["active"]: return
-        if move not in ("rock", "paper", "scissors"):
-            send_to(name, "[[INFO]] Nước đi không hợp lệ.")
-            return
-        room["moves"][name] = move
-        p1, p2 = room["players"]
-
-    send_to(name, f"[[YOU_MOVED]] {move}")
-
-    with rps_lock:
-        room = rooms.get(room_id)
-        if not room or not room["active"]: return
-        p1, p2 = room["players"]
-        if p1 in room["moves"] and p2 in room["moves"]:
-            a, b = room["moves"][p1], room["moves"][p2]
-            res = judge(a, b)
-            winner = None
-            if res == "a":
-                room["scores"][p1] += 1
-                winner = p1
-            elif res == "b":
-                room["scores"][p2] += 1
-                winner = p2
-            for pl in (p1, p2):
-                send_to(pl, f"[[ROUND]] {room['round']} {p1}:{a} {p2}:{b} "
-                             f"{'DRAW' if not winner else 'WIN:'+winner} {room['scores']}")
-            room["moves"].clear()
-            room["round"] += 1
-            need = (room["best_of"] // 2) + 1
-            if room["scores"][p1] >= need or room["scores"][p2] >= need:
-                final = p1 if room["scores"][p1] > room["scores"][p2] else p2
-                for pl in (p1, p2):
-                    send_to(pl, f"[[GAME_END]] {final} {room['scores']}")
-                end_room(room_id)
-
-def handle_command(name, text):
-    if text.startswith("/invite "):
-        target = text.split()[1][1:]
-        if target == name:
-            send_to(name, "[[INFO]] Không thể mời chính bạn.")
-            return
-        if target not in names_to_sock:
-            send_to(name, "[[INFO]] Không tìm thấy người.")
-            return
-        if not can_play(name) or not can_play(target):
-            send_to(name, "[[INFO]] Một trong hai đang bận.")
-            return
-        pending_invite[target] = name
-        send_to(name, f"[[INFO]] Đã gửi lời mời tới {target}.")
-        send_to(target, f"[[INVITE]] {name}")
-        return
-
-    if text.startswith("/accept "):
-        inviter = text.split()[1]
-        if pending_invite.get(name) != inviter:
-            send_to(name, "[[INFO]] Không có lời mời hợp lệ.")
-            return
-        pending_invite.pop(name, None)
-        if not can_play(name) or not can_play(inviter):
-            send_to(name, "[[INFO]] Một trong hai đang bận.")
-            return
-        room_id = create_room(inviter, name)
-        if room_id:
-            send_to(inviter, f"[[GAME_START]] {inviter},{name}")
-            send_to(name, f"[[GAME_START]] {inviter},{name}")
-        return
-
-    if text.startswith("/decline "):
-        inviter = text.split()[1]
-        if pending_invite.get(name) == inviter:
-            pending_invite.pop(name, None)
-            send_to(inviter, f"[[INFO]] {name} từ chối lời mời.")
-        return
-
-    if text.startswith("/move "):
-        mv = text.split()[1]
-        handle_move(name, mv)
-        return
-
-    if text.startswith("/quitgame"):
-        rid = game_of.get(name)
-        if rid:
-            end_room(rid)
-        send_to(name, "[[INFO]] Đã thoát ván.")
-        return
-
-# ======= SERVER CORE =======
-def accept_incoming():
-    while True:
-        client, addr = SERVER.accept()
-        print(f"[NEW CONNECTION] {addr}")
-        client.send("Nhập tên:".encode("utf8"))
-        Thread(target=handle_client, args=(client,), daemon=True).start()
-
-def handle_client(client):
+# ====== XỬ LÝ YÊU CẦU NGƯỜI CHƠI ======
+def xu_ly_client(client):
     try:
-        name = client.recv(BUFSIZ).decode("utf8").strip()
-        if not name:
-            name = f"user_{len(clients)+1}"
-        clients[client] = name
-        names_to_sock[name] = client
-        broadcast(f"{name} đã tham gia!".encode("utf8"))
+        ten = client.recv(1024).decode('utf-8')
+        danh_sach_client[client] = ten
+        ten_nguoi_choi_dict[ten] = client
+        print(f"[+] {ten} đã kết nối")
+        phat_broadcast(f"🔵 {ten} đã tham gia trò chơi.")
 
         while True:
-            data = client.recv(BUFSIZ)
-            if not data: break
-            text = data.decode("utf8").strip()
-            if text == "{quit}": break
-            if text.startswith("/"):
-                handle_command(name, text)
-            else:
-                broadcast(data, prefix=name + ": ")
-    except:
-        pass
+            du_lieu = client.recv(1024).decode('utf-8')
+            if not du_lieu:
+                break
+
+            # ----- Tin nhắn chat -----
+            if du_lieu.startswith("Chat:"):
+                tin_nhan = du_lieu[5:]
+                phat_broadcast(f"[{ten}]: {tin_nhan}")
+
+            # ----- Mời chơi -----
+            elif du_lieu.startswith("Invite:"):
+                doi_thu = du_lieu.split(":", 1)[1]
+                if doi_thu in ten_nguoi_choi_dict:
+                    loi_moi[doi_thu] = ten
+                    gui_tin_nhan(ten_nguoi_choi_dict[doi_thu], f"📨 {ten} mời bạn chơi.")
+                    gui_tin_nhan(client, f"✅ Đã gửi lời mời đến {doi_thu}.")
+                else:
+                    gui_tin_nhan(client, f"⚠️ Người chơi {doi_thu} không tồn tại hoặc chưa online.")
+
+            # ----- Chấp nhận lời mời -----
+            elif du_lieu == "Accept":
+                if ten in loi_moi:
+                    nguoi_moi = loi_moi[ten]
+                    gui_tin_nhan(ten_nguoi_choi_dict[nguoi_moi], f"🎯 {ten} đã chấp nhận lời mời.")
+                    gui_tin_nhan(client, f"🎮 Bắt đầu chơi với {nguoi_moi}!")
+                    del loi_moi[ten]
+                else:
+                    gui_tin_nhan(client, "⚠️ Không có lời mời nào đang chờ.")
+
+            # ----- Chọn nước đi -----
+            elif du_lieu in ["búa", "bao", "kéo"]:
+                lua_chon[ten] = du_lieu
+                gui_tin_nhan(client, f"🕹 Bạn đã chọn: {du_lieu}")
+
+                # Khi đủ 2 người đã chọn, tính kết quả
+                if len(lua_chon) >= 2:
+                    nguoi_choi = list(lua_chon.keys())
+                    if len(nguoi_choi) >= 2:
+                        p1, p2 = nguoi_choi[0], nguoi_choi[1]
+                        ket_qua = xac_dinh_thang(p1, p2)
+                        phat_broadcast(f"🪨 {p1}: {lua_chon[p1]} | ✂️ {p2}: {lua_chon[p2]} ➜ {ket_qua}")
+                        lua_chon.clear()
+
+    except Exception as e:
+        print(f"Lỗi từ client {danh_sach_client.get(client, '?')}: {e}")
+
     finally:
-        name = clients.get(client)
-        if name:
-            print(f"[DISCONNECT] {name}")
-            clients.pop(client, None)
-            names_to_sock.pop(name, None)
-            rid = game_of.pop(name, None)
-            if rid:
-                end_room(rid)
-            pending_invite.pop(name, None)
-            for t, i in list(pending_invite.items()):
-                if i == name:
-                    pending_invite.pop(t, None)
-            broadcast(f"{name} đã thoát.".encode("utf8"))
+        ten_roi = danh_sach_client.get(client, "Người chơi")
+        print(f"[-] {ten_roi} đã ngắt kết nối.")
+        phat_broadcast(f"🔴 {ten_roi} đã rời trò chơi.")
+        if ten_roi in ten_nguoi_choi_dict:
+            del ten_nguoi_choi_dict[ten_roi]
+        if client in danh_sach_client:
+            del danh_sach_client[client]
         client.close()
 
+# ====== CHẠY SERVER ======
+def bat_dau_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((ĐỊA_CHỦ, CỔNG))
+    server.listen()
+    print(f"🚀 Server đang chạy tại {ĐỊA_CHỦ}:{CỔNG}")
+
+    while True:
+        client, dia_chi = server.accept()
+        client.send("Nhập tên của bạn:".encode('utf-8'))
+        threading.Thread(target=xu_ly_client, args=(client,), daemon=True).start()
+
 if __name__ == "__main__":
-    print("[STARTING] Server đang khởi động...")
-    SERVER.listen(5)
-    print(f"[LISTENING] Server đang chạy tại {HOST}:{PORT}")
-    accept_incoming()
+    bat_dau_server()
