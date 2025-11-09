@@ -1,3 +1,4 @@
+# server.py
 import socket
 import threading
 import time
@@ -10,6 +11,10 @@ ten_nguoi_choi_dict = {}
 loi_moi = {}
 lua_chon = {}
 dang_choi = {}
+diem_so = {}
+van_hien_tai = {}
+trang_thai_tran = {}
+choi_lai = {}  # MỚI: Lưu trạng thái chơi lại
 
 def gui(nguoi_nhan, tin):
     try: nguoi_nhan.send(tin.encode('utf-8'))
@@ -32,6 +37,55 @@ def xac_dinh_thang(p1, p2):
 def luu_lich_su(kq):
     with open("history.txt", "a", encoding="utf-8") as f:
         f.write(f"[{time.strftime('%H:%M %d/%m')}] {kq}\n")
+
+def bat_dau_tran(p1, p2):
+    diem_so[p1] = 0
+    diem_so[p2] = 0
+    van_hien_tai[p1] = 1
+    van_hien_tai[p2] = 1
+    trang_thai_tran[p1] = "choi"
+    trang_thai_tran[p2] = "choi"
+    choi_lai.pop(p1, None)
+    choi_lai.pop(p2, None)
+
+    c1 = ten_nguoi_choi_dict[p1]
+    c2 = ten_nguoi_choi_dict[p2]
+
+    gui(c1, f"Đối thủ: {p2}")
+    gui(c2, f"Đối thủ: {p1}")
+    time.sleep(0.1)
+    gui(c1, "Trận đấu bắt đầu! BO3.")
+    gui(c2, "Trận đấu bắt đầu! BO3.")
+    gui(c1, "Ván 1/3\n")
+    gui(c2, "Ván 1/3\n")
+    gui(c1, f"TỈ SỐ {p1} : {diem_so[p1]} - {diem_so[p2]} : {p2}")
+    gui(c2, f"TỈ SỐ {p1} : {diem_so[p1]} - {diem_so[p2]} : {p2}")
+
+def cap_nhat_diem(p1, p2, kq):
+    if "thắng!" in kq:
+        winner = p1 if p1 in kq else p2
+        diem_so[winner] += 1
+    
+    c1 = ten_nguoi_choi_dict[p1]
+    c2 = ten_nguoi_choi_dict[p2]
+    
+    gui(c1, f"Ván {van_hien_tai[p1] + 1}/3\n")
+    gui(c2, f"Ván {van_hien_tai[p2] + 1}/3\n")
+    gui(c1, f"TỈ SỐ {p1} : {diem_so[p1]} - {diem_so[p2]} : {p2}")
+    gui(c2, f"TỈ SỐ {p1} : {diem_so[p1]} - {diem_so[p2]} : {p2}")
+
+def kiem_tra_ket_thuc(p1, p2):
+    if diem_so[p1] >= 2 or diem_so[p2] >= 2:
+        winner = p1 if diem_so[p1] >= 2 else p2
+        c1 = ten_nguoi_choi_dict[p1]
+        c2 = ten_nguoi_choi_dict[p2]
+        gui(c1, f"\n*** {winner} THẮNG TRẬN! ***\n")
+        gui(c2, f"\n*** {winner} THẮNG TRẬN! ***\n")
+        luu_lich_su(f"{p1} vs {p2}: {winner} thắng trận (BO3)")
+        trang_thai_tran[p1] = "ket_thuc"
+        trang_thai_tran[p2] = "ket_thuc"
+        return True
+    return False
 
 def xu_ly(client):
     try:
@@ -66,8 +120,7 @@ def xu_ly(client):
                     p2 = ten
                     dang_choi[p1] = p2
                     dang_choi[p2] = p1
-                    gui(ten_nguoi_choi_dict[p1], f"{p2} đã chấp nhận. Bắt đầu!")
-                    gui(client, f"Bắt đầu chơi với {p1}!")
+                    bat_dau_tran(p1, p2)
                     del loi_moi[ten]
 
             elif du_lieu == "Reject":
@@ -77,17 +130,43 @@ def xu_ly(client):
                     del loi_moi[ten]
 
             elif du_lieu in ["búa", "bao", "kéo"]:
-                if ten not in dang_choi: continue
+                if ten not in dang_choi or trang_thai_tran.get(ten) != "choi": 
+                    continue
                 doi = dang_choi[ten]
                 lua_chon[ten] = du_lieu
-                gui(client, f"Bạn chọn: {du_lieu}")
+
                 if ten in lua_chon and doi in lua_chon:
                     kq = xac_dinh_thang(ten, doi)
-                    phat(f"{ten}: {lua_chon[ten]} | {doi}: {lua_chon[doi]} -> {kq}")
+                    c1 = ten_nguoi_choi_dict[ten]
+                    c2 = ten_nguoi_choi_dict[doi]
+                    gui(c1, f"{ten}: {lua_chon[ten]} | {doi}: {lua_chon[doi]} -> {kq}")
+                    gui(c2, f"{ten}: {lua_chon[ten]} | {doi}: {lua_chon[doi]} -> {kq}")
                     luu_lich_su(f"{ten} vs {doi}: {kq}")
+                    cap_nhat_diem(ten, doi, kq)
+
+                    if not kiem_tra_ket_thuc(ten, doi):
+                        van_hien_tai[ten] += 1
+                        van_hien_tai[doi] += 1
+                    else:
+                        gui(c1, "Kết thúc! Chờ chơi lại...")
+                        gui(c2, "Kết thúc! Chờ chơi lại...")
                     lua_chon.clear()
-                    del dang_choi[ten]
-                    del dang_choi[doi]
+
+            elif du_lieu == "Chơi lại":
+                if ten not in dang_choi or trang_thai_tran.get(ten) != "ket_thuc":
+                    continue
+                doi = dang_choi[ten]
+                choi_lai[ten] = True
+                gui(client, "Bạn đã chọn chơi lại. Đang chờ đối thủ...")
+
+                if choi_lai.get(doi, False):
+                    choi_lai.pop(ten, None)
+                    choi_lai.pop(doi, None)
+                    bat_dau_tran(ten, doi)
+                    gui(ten_nguoi_choi_dict[ten], "Cả hai đã đồng ý! Bắt đầu lại...")
+                    gui(ten_nguoi_choi_dict[doi], "Cả hai đã đồng ý! Bắt đầu lại...")
+                else:
+                    gui(ten_nguoi_choi_dict[doi], f"{ten} muốn chơi lại!")
 
     except Exception as e:
         print(f"Lỗi: {e}")
@@ -96,6 +175,13 @@ def xu_ly(client):
             ten_roi = danh_sach_client[client]
             print(f"[-] {ten_roi} rời.")
             phat(f"{ten_roi} đã rời.")
+            # Thông báo đối thủ nếu đang chơi
+            if ten_roi in dang_choi:
+                doi = dang_choi[ten_roi]
+                if doi in ten_nguoi_choi_dict:
+                    gui(ten_nguoi_choi_dict[doi], f"{ten_roi} đã rời trận đấu.")
+                dang_choi.pop(ten_roi, None)
+                dang_choi.pop(doi, None)
             ten_nguoi_choi_dict.pop(ten_roi, None)
             danh_sach_client.pop(client, None)
         client.close()
